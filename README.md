@@ -1,7 +1,7 @@
 # Ema-John Server
 
 <p align="center">
-  <img src="https://s3-alpha.figma.com/hub/file/1686880388/27d6e325-7c14-416d-96c5-bf5be1c8e8fd-cover.png" alt="Ema-John Server" style="max-width: 100%; height: auto;">
+  <img src="./assets/project-cover.png" alt="Ema-John Server" style="max-width: 100%; height: auto;">
 </p>
 
 This is the server-side code for the Ema-John e-commerce website. It provides API endpoints for managing products, orders, and users.
