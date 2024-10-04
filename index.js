@@ -2,11 +2,22 @@
 const path = require("path");
 
 // Third-party packages
-const express = require("express");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const dotenv = require("dotenv");
-const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+// ** Express and middleware imports **
+const express = require("express"); // Main framework for creating the server
+const cors = require("cors"); // Middleware to enable CORS (Cross-Origin Resource Sharing)
+const bodyParser = require("body-parser"); // Middleware to parse incoming request bodies
+
+// ** Configuration imports **
+const dotenv = require("dotenv"); // Load environment variables from a .env file
+
+// ** Database imports **
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb"); // MongoDB driver and utilities for database operations
+
+// ** Authentication imports **
+const admin = require("firebase-admin"); // Firebase Admin SDK for server-side Firebase operations
+
+// ** Payment processing imports **
+const Stripe = require("stripe"); // Stripe library for payment processing
 
 // Load environment variables
 dotenv.config();
@@ -15,10 +26,10 @@ dotenv.config();
 const app = express();
 
 // Middleware setup
-app.use(cors());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-
+app.use(cors()); // Enable Cross-Origin Resource Sharing (CORS) for all routes
+app.use(bodyParser.json()); // Parse incoming JSON payloads
+app.use(bodyParser.urlencoded({ extended: true })); // Parse URL-encoded bodies (as sent by HTML forms)
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY); // Initialize Stripe with the secret key from environment variables
 // MongoDB connection configuration
 const uri = `mongodb+srv://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@cluster0.dkmkvf0.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 const client = new MongoClient(uri, {
@@ -29,8 +40,8 @@ const client = new MongoClient(uri, {
   },
 });
 
-// Database and collection references
-let database, productsCollection;
+// MongoDB database and collection references
+let database, productsCollection, ordersCollection, reviewsCollection;
 
 // Connect to MongoDB
 async function connectToDatabase() {
@@ -39,6 +50,8 @@ async function connectToDatabase() {
   // • Log successful connection
   // • Initialize database and collection references
   // • Handle and log any connection errors
+  // • Implement connection retry mechanism
+  // • Set up database indexes (if needed)
 
   try {
     // Attempt to connect to the MongoDB server
@@ -48,10 +61,14 @@ async function connectToDatabase() {
     console.log("Connected successfully to MongoDB");
 
     // Initialize the database reference using the environment variable
-    database = client.db(process.env.DB_DATABSE);
+    database = client.db(process.env.DB_DATABASE);
 
-    // Initialize the collection reference using the environment variable
-    productsCollection = database.collection(process.env.DB_COLLECTION);
+    // Initialize the collection references using the environment variables
+    productsCollection = database.collection(
+      process.env.DB_PRODUCTS_COLLECTION
+    );
+    ordersCollection = database.collection(process.env.DB_ORDERS_COLLECTION);
+    reviewsCollection = database.collection(process.env.DB_REVIEWS_COLLECTION);
   } catch (error) {
     // Log any errors that occur during the connection process
     console.error("Error connecting to MongoDB:", error);
@@ -69,18 +86,120 @@ async function connectToDatabase() {
 app.get("/products", async (req, res) => {
   // Task list:
   // • Retrieve all products from the database
-  // • Send the products as a JSON response
+  // • Shuffle the products
+  // • Send the shuffled products as a JSON response
   // • Handle any errors that occur during the process
 
   try {
     // Query the productsCollection to find all documents and convert to an array
     const products = await productsCollection.find({}).toArray();
 
-    // Send the retrieved products as a JSON response
+    // Shuffle the products array
+    for (let i = products.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [products[i], products[j]] = [products[j], products[i]];
+    }
+
+    // Send the shuffled products as a JSON response
     res.json(products);
+    console.log("Products fetched successfully");
   } catch (error) {
     // Log any errors that occur during the product retrieval process
     console.error("Error fetching products:", error);
+
+    // Send a 500 Internal Server Error status with an error message
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Search products by name
+app.get("/products/search", async (req, res) => {
+  // Task list:
+  // • Retrieve the search query from the request parameters
+  // • Search for products in the database that match the query
+  // • Send the matched products as a JSON response
+  // • Handle any errors that occur during the process
+
+  try {
+    // Retrieve the search query from the request parameters
+    const searchQuery = req.query.q;
+
+    // If no search query is provided, return an error
+    if (!searchQuery) {
+      return res.status(400).json({ error: "Search query is required" });
+    }
+
+    // Create a case-insensitive regular expression for the search query
+    const searchRegex = new RegExp(searchQuery, "i");
+
+    // Query the productsCollection to find products with matching names
+    const matchedProducts = await productsCollection
+      .find({ name: { $regex: searchRegex } })
+      .toArray();
+
+    // Send the matched products as a JSON response
+    res.json(matchedProducts);
+  } catch (error) {
+    // Log any errors that occur during the product search process
+    console.error("Error searching products:", error);
+
+    // Send a 500 Internal Server Error status with an error message
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get paginated, shuffled products
+app.get("/products/page", async (req, res) => {
+  // Task list:
+  // • Retrieve the requested page number from the query parameters
+  // • Calculate the total number of products and pages
+  // • Check if the requested page exists
+  // • Retrieve a shuffled, paginated subset of products
+  // • Send the paginated products along with pagination metadata as a JSON response
+  // • Handle any errors that occur during the process
+
+  try {
+    // Parse the page number from the query parameters, defaulting to 1 if not provided
+    const page = parseInt(req.query.page) || 1;
+
+    // Set the number of products per page
+    const pageSize = 10;
+
+    // Count the total number of products in the collection
+    const totalProducts = await productsCollection.countDocuments();
+
+    // Calculate the total number of pages needed to display all products
+    const totalPages = Math.ceil(totalProducts / pageSize);
+
+    // Check if the requested page number is greater than the total number of pages
+    if (page > totalPages) {
+      // If the page doesn't exist, return a 404 error
+      return res.status(404).json({ error: "Page not found" });
+    }
+
+    // Use aggregation to shuffle and paginate the products
+    const products = await productsCollection
+      .aggregate([
+        // Randomly sample all products to shuffle them
+        { $sample: { size: totalProducts } },
+        // Skip the products on previous pages
+        { $skip: (page - 1) * pageSize },
+        // Limit the result to the current page size
+        { $limit: pageSize },
+      ])
+      .toArray();
+
+    // Send the response as JSON, including products and pagination metadata
+    res.json({
+      products,
+      currentPage: page,
+      totalPages,
+      pageSize,
+      totalProducts, // Added to provide information about the total number of products
+    });
+  } catch (error) {
+    // Log any errors that occur during the paginated product retrieval process
+    console.error("Error fetching paginated products:", error);
 
     // Send a 500 Internal Server Error status with an error message
     res.status(500).json({ error: "Internal server error" });
@@ -101,9 +220,8 @@ app.get("/products/seller/:uid", async (req, res) => {
 
     // Query the productsCollection to find all documents for the specific seller and convert to an array
     const sellerProducts = await productsCollection
-      .find({ sellerUid: sellerUid })
+      .find({ sellerID: sellerUid })
       .toArray();
-
     // Send the retrieved products as a JSON response
     res.json(sellerProducts);
   } catch (error) {
@@ -115,7 +233,7 @@ app.get("/products/seller/:uid", async (req, res) => {
   }
 });
 
-// Get a specific product
+// Add a new product
 app.post("/products/add", async (req, res) => {
   // Task list:
   // • Receive new product data from the request body
@@ -126,13 +244,12 @@ app.post("/products/add", async (req, res) => {
   try {
     // Extract the new product data from the request body
     const newProduct = req.body;
-
     // Insert the new product into the productsCollection
     const result = await productsCollection.insertOne(newProduct);
 
     // Send a 201 Created status with a success message and the inserted product's ID
     res.status(201).json({
-      message: "Product inserted successfully",
+      message: "A new product added successfully",
       insertedId: result.insertedId,
     });
   } catch (error) {
@@ -199,7 +316,6 @@ app.delete("/products/delete/:id", async (req, res) => {
   try {
     // Extract the product ID from the request parameters
     const productId = req.params.id;
-
     // Attempt to delete the product from the database using its ID
     const result = await productsCollection.deleteOne({
       _id: new ObjectId(productId),
@@ -234,8 +350,16 @@ app.get("/orders", async (req, res) => {
   // • Verify the seller's authentication using Firebase
   // • Fetch orders from the database for the authenticated seller
   // • Send a response with the retrieved orders
+  // • Handle any errors that occur during the process
 
   try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_ADMIN_SDK_CONFIG); // Firebase service account credentials
+    // Firebase Admin SDK initialization
+    // This allows server-side Firebase operations with elevated privileges
+    admin.initializeApp({
+      // Use the service account credentials for authentication
+      credential: admin.credential.cert(serviceAccount),
+    });
     // Get the Firebase ID token from the request headers
     const idToken = req.headers.authorization?.split("Bearer ")[1];
 
@@ -248,12 +372,11 @@ app.get("/orders", async (req, res) => {
 
     // Verify the Firebase ID token
     const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const sellerId = decodedToken.uid;
+    const sellerID = decodedToken.uid;
 
     // Fetch orders for the specific seller from the database
-    const orders = await db
-      .collection("orders")
-      .find({ sellerId: sellerId })
+    const orders = await ordersCollection
+      .find({ sellerID: sellerID })
       .toArray();
 
     // Send a success response with the retrieved orders
@@ -266,49 +389,51 @@ app.get("/orders", async (req, res) => {
     console.error("Error retrieving orders:", error);
 
     // Send a 500 Internal Server Error status with an error message
-    res.status(500).json({ error: "Internal server error" });
+    res.status(500).json({
+      errorMessage: "Internal server error - Error retrieving orders",
+      error,
+    });
   }
 });
 
 // Add new order
 app.post("/orders/add", async (req, res) => {
   // Task list:
-  // • Handle POST requests to create a new order
-  // • Validate the request body
-  // • Create a new order in the database
-  // • Send a response with the created order
+  // • Handle POST requests to create multiple new orders
+  // • Validate the request body (ensure it's an array)
+  // • Remove any existing _id fields from the orders
+  // • Insert multiple orders into the database
+  // • Send a response with the created orders and insert count
+  // • Handle any errors that occur during the process
 
   try {
-    // Extract order details from the request body
-    const { customerId, products, totalAmount } = req.body;
+    const orderedProducts = req.body;
 
-    // Validate the request body
-    if (!customerId || !products || !totalAmount) {
-      return res.status(400).json({ error: "Missing required fields" });
+    // Ensure orderedProducts is an array
+    if (!Array.isArray(orderedProducts)) {
+      return res
+        .status(400)
+        .json({ error: "Invalid request body. Expected an array of orders." });
     }
 
-    // Create a new order document
-    const newOrder = {
-      customerId,
-      products,
-      totalAmount,
-      orderDate: new Date(),
-    };
+    // Remove any existing _id fields from the orders
+    const ordersWithoutIds = orderedProducts.map((order) => {
+      const { _id, ...orderWithoutId } = order;
+      return orderWithoutId;
+    });
 
-    // Insert the new order into the database
-    const result = await db.collection("orders").insertOne(newOrder);
+    // Insert multiple orders into the database
+    const result = await ordersCollection.insertMany(ordersWithoutIds);
 
-    // Send a success response with the created order
+    // Send a success response with the created orders
     res.status(201).json({
-      message: "Order created successfully",
-      order: {
-        _id: result.insertedId,
-        ...newOrder,
-      },
+      message: "Orders created successfully",
+      orders: result.ops,
+      insertedCount: result.insertedCount,
     });
   } catch (error) {
     // Log any errors that occur during the order creation process
-    console.error("Error creating order:", error);
+    console.error("Error creating orders:", error);
 
     // Send a 500 Internal Server Error status with an error message
     res.status(500).json({ error: "Internal server error" });
@@ -316,7 +441,7 @@ app.post("/orders/add", async (req, res) => {
 });
 
 // Delete a specific order
-app.delete("/orders/:orderId", async (req, res) => {
+app.delete("/orders/:orderID", async (req, res) => {
   // Task list:
   // • Handle DELETE requests to remove a specific order
   // • Validate the order ID
@@ -325,17 +450,15 @@ app.delete("/orders/:orderId", async (req, res) => {
 
   try {
     // Extract the order ID from the request parameters
-    const { orderId } = req.params;
+    const { orderID } = req.params;
 
     // Validate the order ID
-    if (!orderId) {
+    if (!orderID) {
       return res.status(400).json({ error: "Missing order ID" });
     }
 
     // Delete the order from the database
-    const result = await db
-      .collection("orders")
-      .deleteOne({ _id: new ObjectId(orderId) });
+    const result = await ordersCollection.deleteOne({ orderID: orderID });
 
     // Check if an order was actually deleted
     if (result.deletedCount === 0) {
@@ -353,6 +476,72 @@ app.delete("/orders/:orderId", async (req, res) => {
   }
 });
 
+// Get random product reviews
+app.get("/product-reviews", async (req, res) => {
+  // Task list:
+  // • Handle GET requests to retrieve random product reviews
+  // • Fetch a random number (not less than 10) of product reviews from the database
+  // • Send the reviews as a response
+  // • Handle any errors that occur during the process
+
+  try {
+    // Determine the number of reviews to fetch (random number between 10 and 20)
+    const reviewCount = Math.floor(Math.random() * 11) + 10;
+
+    // Fetch random reviews from the database
+    const reviews = await reviewsCollection
+      .aggregate([{ $sample: { size: reviewCount } }])
+      .toArray();
+
+    // Check if reviews were found
+    if (reviews.length === 0) {
+      return res.status(404).json({ error: "No reviews found" });
+    }
+
+    // Send the reviews as a response
+    res.status(200).json(reviews);
+  } catch (error) {
+    // Log any errors that occur during the review retrieval process
+    console.error("Error fetching product reviews:", error);
+
+    // Send a 500 Internal Server Error status with an error message
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Add new product review
+app.post("/product-reviews/add", async (req, res) => {
+  // Task list:
+  // • Handle POST requests to add a new product review
+  // • Validate the incoming review data
+  // • Insert the new review into the database
+  // • Send a success response
+  // • Handle any errors that occur during the process
+
+  try {
+    console.log("Adding product review");
+    // Extract the review data from the request body
+    const { review } = req.body;
+
+    // Insert the new review into the database
+    const result = await reviewsCollection.insertOne(review);
+
+    // Check if the review was successfully inserted
+    if (result.insertedCount === 0) {
+      return res.status(500).json({ error: "Failed to add review" });
+    }
+
+    // Send a success response
+    res.status(201).json({ message: "Review added successfully" });
+  } catch (error) {
+    // Log any errors that occur during the review addition process
+    console.error("Error adding product review:", error);
+
+    // Send a 500 Internal Server Error status with an error message
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Simple route
 // Define a route for the root URL ("/")
 app.get("/", (req, res) => {
@@ -362,6 +551,35 @@ app.get("/", (req, res) => {
 
   // Send the "Hello, World!" text as the response
   res.send("Hello, World!");
+});
+
+// Create payment intent for Stripe
+app.post("/create-payment-intent", async (req, res) => {
+  // Task list:
+  // • Handle POST requests to create a payment intent
+  // • Extract the amount from the request body
+  // • Create a payment intent using the Stripe API
+  // • Send the clientSecret back to the client
+  // • Handle any errors that occur during the process
+
+  try {
+    // Extract the amount from the request body
+    const { amount } = req.body;
+
+    // Create a payment intent using the Stripe API
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount,
+      currency: "usd",
+    });
+    // Send the clientSecret back to the client
+    res.status(200).json({ clientSecret: paymentIntent.client_secret });
+  } catch (error) {
+    // Log any errors that occur during the payment intent creation process
+    console.error("Error creating payment intent:", error);
+
+    // Send a 500 Internal Server Error status with an error message
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // Start server
@@ -376,7 +594,7 @@ async function startServer() {
   await connectToDatabase();
 
   // Set the port number, using the environment variable if available, otherwise default to 3000
-  const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT || 5000;
 
   // Start the server and make it listen on the specified port
   app.listen(PORT, () => {
