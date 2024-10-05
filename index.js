@@ -354,12 +354,18 @@ app.get("/orders", async (req, res) => {
 
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_ADMIN_SDK_CONFIG); // Firebase service account credentials
-    // Firebase Admin SDK initialization
-    // This allows server-side Firebase operations with elevated privileges
-    admin.initializeApp({
-      // Use the service account credentials for authentication
-      credential: admin.credential.cert(serviceAccount),
-    });
+    // Check if Firebase app is already initialized
+    if (admin.apps.length < 1) {
+      // Firebase Admin SDK initialization
+      // This allows server-side Firebase operations with elevated privileges
+      admin.initializeApp({
+        // Use the service account credentials for authentication
+        credential: admin.credential.cert(serviceAccount),
+      });
+    }
+
+    console.log(admin.apps.length);
+
     // Get the Firebase ID token from the request headers
     const idToken = req.headers.authorization?.split("Bearer ")[1];
 
@@ -551,6 +557,7 @@ app.get("/", (req, res) => {
 
   // Send the "Hello, World!" text as the response
   res.send("Hello, World!");
+  console.log("Server Running");
 });
 
 // Create payment intent for Stripe
